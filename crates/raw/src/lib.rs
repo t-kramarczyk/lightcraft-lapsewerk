@@ -843,23 +843,105 @@ impl RawImage {
             .collect();
         let mut out = vec![0f32; a.width * a.height * cpp];
         let row_len = a.width * cpp;
+        // The black level of a row's samples without the row delta, once for each row of the repeat
+        // pattern: `BlackLevel::at`'s sums in the same order (pattern + column delta, then + row
+        // delta), without two divisions and three lookups per sample.
+        let black = &self.black;
+        let (pr, pc) = (black.repeat_rows.max(1), black.repeat_cols.max(1));
+        let pattern: Vec<Vec<f32>> = (0..pr)
+            .map(|py| {
+                (0..row_len)
+                    .map(|i| {
+                        let (x, s) = (i / cpp, i % cpp);
+                        let idx = (py * pc + (x % pc)) * cpp + s;
+                        let base = black.values.get(idx).or_else(|| black.values.first()).copied().unwrap_or(0.0);
+                        base + black.delta_h.get(x).copied().unwrap_or(0.0)
+                    })
+                    .collect()
+            })
+            .collect();
         use rayon::prelude::*;
         out.par_chunks_mut(row_len).enumerate().for_each(|(y, row)| {
             let base = ((a.y + y) * w + a.x) * cpp;
-            for x in 0..a.width {
-                for s in 0..cpp {
-                    let v = src(base + x * cpp + s);
-                    let b = self.black.at(x, y, s, cpp);
-                    // a NaN or infinite sample (a float DNG's, or a black level a file got wrong)
-                    // reads as black, so the demosaic and every stage after it see numbers
-                    let n = (v - b) * scale[s];
-                    row[x * cpp + s] = if n.is_finite() { n } else { 0.0 };
+            let row_black = &pattern[y % pr];
+            let dv = black.delta_v.get(y).copied().unwrap_or(0.0);
+            // a NaN or infinite sample (a float DNG's, or a black level a file got wrong)
+            // reads as black, so the demosaic and every stage after it see numbers
+            let put = |o: &mut f32, v: f32, b: f32, scale: f32| {
+                let n = (v - (b + dv)) * scale;
+                *o = if n.is_finite() { n } else { 0.0 };
+            };
+            match (&stage1, &self.data) {
+                (None, RawData::U16(data)) => {
+                    let src_row = &data[base..base + row_len];
+                    for ((o, v), b) in row.chunks_exact_mut(cpp).zip(src_row.chunks_exact(cpp)).zip(row_black.chunks_exact(cpp)) {
+                        for s in 0..cpp {
+                            put(&mut o[s], v[s] as f32, b[s], scale[s]);
+                        }
+                    }
+                }
+                _ => {
+                    for (i, (o, b)) in row.iter_mut().zip(row_black).enumerate() {
+                        put(o, src(base + i), *b, scale[i % cpp]);
+                    }
                 }
             }
         });
         let cfa = self.cfa.as_ref().map(|c| c.shifted(a.x, a.y));
         opcodes::apply_list(&self.opcodes.list2, &mut out, a.width, a.height, cpp, cfa.as_ref(), 1.0);
         Ok(Normalized { width: a.width, height: a.height, cpp, data: out, cfa })
+    }
+
+    /// Replaces the mosaic samples at `indices` (positions in `data`) with the median of the nearest samples of
+    /// the same colour (the 5 × 5 neighbourhood, 7 × 7 when that holds fewer than four) that are not listed
+    /// themselves: hot and stuck pixels found by comparing many frames of a sequence (Lapsewerk patch). Only
+    /// single-sample-per-pixel mosaics with a CFA; returns how many samples were replaced.
+    pub fn repair_samples(&mut self, indices: &[usize]) -> usize {
+        let (Some(cfa), 1) = (self.cfa.as_ref(), self.cpp) else { return 0 };
+        let (w, h) = (self.width, self.height);
+        let mut listed: Vec<usize> = indices.iter().copied().filter(|&i| i < w * h).collect();
+        listed.sort_unstable();
+        listed.dedup();
+        let is_listed = |i: usize| listed.binary_search(&i).is_ok();
+        let mut fixes = Vec::with_capacity(listed.len());
+        for &i in &listed {
+            let (x, y) = (i % w, i / w);
+            let colour = cfa.color_at(x, y);
+            let mut found: Vec<f32> = Vec::with_capacity(16);
+            for r in [2isize, 3] {
+                found.clear();
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        let (nx, ny) = (x as isize + dx, y as isize + dy);
+                        if (dx, dy) == (0, 0) || nx < 0 || ny < 0 || nx as usize >= w || ny as usize >= h {
+                            continue;
+                        }
+                        let (nx, ny) = (nx as usize, ny as usize);
+                        let j = ny * w + nx;
+                        if cfa.color_at(nx, ny) == colour && !is_listed(j) {
+                            found.push(self.data.get(j));
+                        }
+                    }
+                }
+                if found.len() >= 4 {
+                    break;
+                }
+            }
+            if found.is_empty() {
+                continue;
+            }
+            found.sort_by(f32::total_cmp);
+            let mid = found.len() / 2;
+            let median = if found.len() % 2 == 1 { found[mid] } else { 0.5 * (found[mid - 1] + found[mid]) };
+            fixes.push((i, median));
+        }
+        for &(i, v) in &fixes {
+            match &mut self.data {
+                RawData::U16(d) => d[i] = v.round().clamp(0.0, 65535.0) as u16,
+                RawData::F32(d) => d[i] = v,
+            }
+        }
+        fixes.len()
     }
 
     /// Full "raw → camera RGB" path: normalise, demosaic with `method`, apply `OpcodeList3`, then the default crop.

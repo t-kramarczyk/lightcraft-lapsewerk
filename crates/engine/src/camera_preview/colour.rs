@@ -68,6 +68,20 @@ pub(crate) fn starting_colour(
     (xy, t, look)
 }
 
+/// [`starting_colour`] with `look` instead of one fitted to this file's JPEG: the as-shot white and camera transform
+/// are still this file's, only the fitted look is shared (a time-lapse developed with one look, issue: per-frame looks
+/// follow the camera's per-frame JPEG processing, e.g. Sony DRO, and flicker). A file with colour matrices of its own
+/// gets no look, as with [`starting_colour`].
+pub(crate) fn starting_colour_fixed(raw: &mut RawImage, look: &CameraLook) -> (Xy, CameraTransform, Option<CameraLook>) {
+    starting_colour_with(raw, |_, _| (Some(look.clone()), false), |_, _| None, |_, _| None)
+}
+
+/// [`starting_colour`] without any look fitted to the file's JPEG (Lapsewerk patch, `SequenceLook::Unfitted`): the colour
+/// matrices, else the spectral ones, else the neutral fallback, with the default tone.
+pub(crate) fn starting_colour_unfitted(raw: &mut RawImage) -> (Xy, CameraTransform, Option<CameraLook>) {
+    starting_colour_with(raw, |_, _| (None, false), |_, _| None, |_, _| None)
+}
+
 /// Whether the profile's tone curve is absent or the identity (within 0.005 over the range).
 fn identity_tone_curve(curve: Option<&lightcraft_raw::profile::ToneCurve>) -> bool {
     curve.is_none_or(|c| {

@@ -422,6 +422,57 @@ pub fn from_lua(v: &crate::preset_import::Lua) -> XmpValue {
     }
 }
 
+/// Turn the masks in `partial` (as [`masks`] made them: positions as fractions of the stored image,
+/// radial radii for [`DEFAULT_ASPECT`]) onto the photo as shown, by the file's `orientation`.
+/// A crs sidecar keeps a mask's geometry on the stored image, as it keeps the crop: a portrait raw's
+/// radial filter over the horizon otherwise lands as a narrow band at the left edge.
+pub fn orient_masks(partial: &mut Value, orientation: lightcraft_geom::Orientation) {
+    use lightcraft_geom::Orientation;
+    if orientation == Orientation::Normal {
+        return;
+    }
+    fn points(v: &mut Value, orientation: lightcraft_geom::Orientation) {
+        match v {
+            Value::Object(o) => {
+                if let (Some(x), Some(y)) = (o.get("x").and_then(Value::as_f64), o.get("y").and_then(Value::as_f64)) {
+                    let (u, w) = orientation.map(x, y, 1.0, 1.0);
+                    o.insert("x".into(), json!(u));
+                    o.insert("y".into(), json!(w));
+                    return;
+                }
+                for (_, c) in o.iter_mut() {
+                    points(c, orientation);
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(|c| points(c, orientation)),
+            _ => {}
+        }
+    }
+    let scale = |a: f64| if a >= 1.0 { (1.0, 1.0 / a) } else { (a, 1.0) };
+    let (sx, sy) = scale(DEFAULT_ASPECT);
+    let (mirror, _) = orientation.to_parts();
+    let Some(masks) = partial.get_mut("masks").and_then(Value::as_array_mut) else { return };
+    for m in masks {
+        for c in m["components"].as_array_mut().into_iter().flatten() {
+            let s = &mut c["shape"];
+            points(s, orientation);
+            if s["kind"] == "radial" {
+                // Radii stand for fractions of the width and height; a quarter turn swaps them.
+                if orientation.swaps_axes()
+                    && let (Some(rx), Some(ry)) = (s["rx"].as_f64(), s["ry"].as_f64())
+                {
+                    let (fw, fh) = (rx / sx, ry / sy);
+                    s["rx"] = json!(fh * sx);
+                    s["ry"] = json!(fw * sy);
+                }
+                if mirror && let Some(a) = s["angle"].as_f64() {
+                    s["angle"] = json!(-a);
+                }
+            }
+        }
+    }
+}
+
 /// The aspect radial masks are computed for when the target's shape isn't known yet.
 pub const DEFAULT_ASPECT: f64 = 1.5;
 

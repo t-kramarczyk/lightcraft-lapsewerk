@@ -1774,3 +1774,77 @@ fn existing_photo_settings_are_not_rewritten() {
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A raw developed with the look [`camera_look_of`] fits to it renders exactly as [`load_vec`] does, and a second
+/// frame developed with the first frame's look keeps that look (skipped without corpus raws that fit a look).
+#[test]
+fn camera_look_of_matches_load() {
+    let root = std::env::var_os("LIGHTCRAFT_CORPUS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus"));
+    let Ok(dir) = std::fs::read_dir(root.join("raw")) else { return };
+    let mut paths: Vec<_> =
+        dir.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("arw"))).collect();
+    paths.sort();
+    let mut first_look = None;
+    let mut checked = 0;
+    for path in paths.iter().take(2) {
+        let bytes = std::fs::read(path).unwrap();
+        let Some(look) = super::camera_look_of(&bytes).unwrap() else { continue };
+        let (plain, plain_info) = super::load_vec(bytes.clone(), 512).unwrap();
+        let (fixed, fixed_info) = super::load_vec_with_look(bytes.clone(), 512, &look).unwrap();
+        assert_eq!(plain.data, fixed.data, "{}: own look must render as load_vec", path.display());
+        assert_eq!(plain_info.camera_tone, fixed_info.camera_tone);
+        checked += 1;
+        match &first_look {
+            None => first_look = Some(look),
+            Some(first) => {
+                let (_, shared_info) = super::load_vec_with_look(bytes, 512, first).unwrap();
+                assert_eq!(shared_info.camera_tone, Some(first.tone), "{}: the shared look's tone is used", path.display());
+            }
+        }
+    }
+    eprintln!("camera_look_of_matches_load: {checked} raw(s) with a fitted look checked");
+}
+
+/// Lapsewerk patch: a sequence developed with [`super::SequenceLook`] gets one look in every frame. `Unfitted`
+/// renders a raw whose JPEG fit is refused exactly as `load_vec` does, and one whose fit is accepted without it
+/// (no fitted camera tone); `Shared` gives every frame the shared look's tone. With a night sky in the corpus
+/// (frames whose fit is accepted for some and refused for others, see Lapsewerk's docs/findings.md) both kinds are checked.
+#[test]
+fn sequence_looks_are_one_look_for_every_frame() {
+    use super::SequenceLook;
+    let root = std::env::var_os("LIGHTCRAFT_CORPUS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus"));
+    let Ok(dir) = std::fs::read_dir(root.join("raw")) else { return };
+    let mut paths: Vec<_> =
+        dir.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("arw"))).collect();
+    paths.sort();
+    let (mut refused, mut accepted) = (0, 0);
+    let mut shared = None;
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let own_look = super::camera_look_of(&bytes).unwrap();
+        let (unfitted, info) = super::load_vec_for_sequence(bytes.clone(), 512, &SequenceLook::Unfitted, &[]).unwrap();
+        assert!(info.camera_tone.is_none(), "{}: no fitted tone", path.display());
+        match &own_look {
+            None => {
+                let (plain, _) = super::load_vec(bytes.clone(), 512).unwrap();
+                assert_eq!(plain.data, unfitted.data, "{}: a refused fit renders as load_vec", path.display());
+                refused += 1;
+            }
+            Some(look) => {
+                let (_, own) = super::load_vec_for_sequence(bytes.clone(), 512, &SequenceLook::Own, &[]).unwrap();
+                assert_eq!(own.camera_tone, Some(look.tone), "{}: its own look as fitted", path.display());
+                shared.get_or_insert_with(|| std::sync::Arc::new(look.clone()));
+                accepted += 1;
+            }
+        }
+        if let Some(look) = &shared {
+            let (_, info) = super::load_vec_for_sequence(bytes, 512, &SequenceLook::Shared(look.clone()), &[]).unwrap();
+            assert_eq!(info.camera_tone, Some(look.tone), "{}: the shared look's tone", path.display());
+        }
+    }
+    eprintln!("sequence_looks_are_one_look_for_every_frame: {accepted} fitted, {refused} refused");
+}

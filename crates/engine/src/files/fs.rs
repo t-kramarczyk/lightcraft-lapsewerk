@@ -1,4 +1,4 @@
-use super::load::{load_vec, load_vec_pair, load_vec_reduced};
+use super::load::{load_vec, load_vec_for_sequence, load_vec_pair, load_vec_reduced, load_vec_with_look};
 use super::preview::{fit_box, fs_preview_loader, preview_orientation};
 use super::probe::probe_bytes;
 use super::{Arc, DenoiseSpec, FileLoader, FileProbe, Filter, PairLoader, ReducedLoader, fit};
@@ -87,6 +87,18 @@ pub fn fs_hooks() -> (FileLoader, FileProbe) {
 }
 
 /// The filesystem [`ReducedLoader`]: [`load_vec_reduced`] of the file, gated like [`fs_hooks`]' loader.
+/// A [`FileLoader`] that develops every raw with `look` ([`super::load_vec_with_look`]): install it as the
+/// session's `media.file_loader` (and `reduced_loader`) to render a sequence with one look.
+pub fn fs_loader_with_look(look: Arc<crate::camera_preview::CameraLook>) -> FileLoader {
+    Arc::new(move |path: &str, max_edge: usize| fs_load(path, max_edge, |bytes| load_vec_with_look(bytes, max_edge, &look)))
+}
+
+/// [`FileLoader`] for the frames of a time-lapse sequence (Lapsewerk patch): [`load_vec_for_sequence`] with
+/// the sequence's look ([`super::SequenceLook`]) and its hot pixels repaired.
+pub fn fs_loader_for_sequence(look: super::load::SequenceLook, defects: Arc<Vec<usize>>) -> FileLoader {
+    Arc::new(move |path: &str, max_edge: usize| fs_load(path, max_edge, |bytes| load_vec_for_sequence(bytes, max_edge, &look, &defects)))
+}
+
 pub fn fs_reduced_loader() -> ReducedLoader {
     Arc::new(|path: &str, max_edge: usize| fs_load(path, max_edge, |bytes| load_vec_reduced(bytes, max_edge)))
 }

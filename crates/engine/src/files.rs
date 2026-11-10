@@ -23,9 +23,9 @@ pub use colour::bin_factor;
 pub(crate) use colour::clipped_white;
 #[cfg(test)]
 use fs::quick_image_srgb;
-pub use fs::{fs_hooks, fs_pair_loader, fs_reduced_loader};
+pub use fs::{fs_hooks, fs_loader_for_sequence, fs_loader_with_look, fs_pair_loader, fs_reduced_loader};
 pub(crate) use load::{DngWhite, WbScaleOf, dng_tone_curve};
-pub use load::{load_bytes, load_vec, load_vec_pair, load_vec_reduced};
+pub use load::{SequenceLook, camera_look_of, load_bytes, load_vec, load_vec_for_sequence, load_vec_pair, load_vec_reduced, load_vec_with_look};
 #[cfg(test)]
 use preview::PLAN_PREFIX;
 pub(crate) use preview::decode_raw_preview;

@@ -206,7 +206,25 @@ pub fn parse_sidecar(xmp: &str, target: crate::crs::Target) -> std::result::Resu
     out.develop = match full {
         Some(s) => Some(DevelopPatch::Full(Box::new(s))),
         None if crate::crs::has_adjustments(&d.properties) => {
-            let (partial, unmapped) = crate::crs::to_partial_report(&d.properties, Some(&d.values), target, crate::crs_masks::DEFAULT_ASPECT);
+            let (mut partial, unmapped) = crate::crs::to_partial_report(&d.properties, Some(&d.values), target, crate::crs_masks::DEFAULT_ASPECT);
+            // A `crs:` crop is on the stored image, before the file's orientation (as in a
+            // catalog); ours is on the oriented one. The sidecar names both (its writer records
+            // `tiff:Orientation` and the stored size): turned here, as a catalog's crop is.
+            // Without this a portrait raw's crop landed a quarter turn off (a time-lapse of a city
+            // under a sunrise showed nothing but sky).
+            if let Some(orientation) = m.orientation {
+                let size = |keys: [&str; 2]| {
+                    keys.iter()
+                        .find_map(|k| d.properties.get(*k).and_then(|v| v.first()).and_then(|v| v.trim().parse::<f64>().ok()))
+                        .filter(|v| v.is_finite() && *v > 0.0)
+                };
+                let aspect = match (size(["tiff:ImageWidth", "exif:PixelXDimension"]), size(["tiff:ImageLength", "exif:PixelYDimension"])) {
+                    (Some(w), Some(h)) => w / h,
+                    _ => 1.5,
+                };
+                crate::lightroom_catalog::catalog_crop(&mut partial, orientation, aspect);
+                crate::crs_masks::orient_masks(&mut partial, orientation);
+            }
             // Lightroom's default profiles are named by nearly every sidecar; our own starting look stands
             // in for them, so only another profile is worth a warning
             let profile = crate::crs::camera_profile_name(&d.properties)
@@ -1046,6 +1064,61 @@ mod tests {
         assert_eq!(p.develop.color.vibrance, 12.0);
         assert_eq!(p.develop.effects.clarity, before.effects.clarity, "crs partial keeps unrelated settings");
         assert_eq!(p.meta.title, "Dune & sky", "fields the sidecar doesn't state are kept");
+    }
+
+    #[test]
+    fn crs_crop_of_a_turned_raw_lands_on_the_oriented_photo() {
+        // A crs crop is on the stored (landscape) image; the camera held upright, the file
+        // says orientation 8 (turned a quarter counter-clockwise to show). A stored point (x, y)
+        // shows at (y, 1 - x): the crop's left/right become bottom/top, top/bottom left/right.
+        let x = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+          <rdf:Description rdf:about="" xmlns:tiff="http://ns.adobe.com/tiff/1.0/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+            tiff:Orientation="8" tiff:ImageWidth="7008" tiff:ImageLength="4672" crs:HasCrop="True"
+            crs:CropLeft="0.1" crs:CropRight="0.7" crs:CropTop="0.2" crs:CropBottom="0.9" crs:CropAngle="0"/></rdf:RDF></x:xmpmeta>"#;
+        let sc = parse_sidecar(x, crate::crs::Target::RawAbsolute).unwrap();
+        let Some(DevelopPatch::Partial(v)) = sc.develop else { panic!("a crs crop is a partial patch") };
+        let r = v.pointer("/crop/geometry/rect").expect("a crop");
+        let e = |k: &str| r.get(k).and_then(Value::as_f64).unwrap();
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(near(e("x0"), 0.2) && near(e("x1"), 0.9), "{r}");
+        assert!(near(e("y0"), 0.3) && near(e("y1"), 0.9), "{r}");
+        // Upright files (no orientation, or 1) keep the crop as written.
+        let plain = x.replace(r#"tiff:Orientation="8" "#, "");
+        let Some(DevelopPatch::Partial(v)) = parse_sidecar(&plain, crate::crs::Target::RawAbsolute).unwrap().develop else { panic!() };
+        let r = v.pointer("/crop/geometry/rect").expect("a crop");
+        assert!(near(r["x0"].as_f64().unwrap(), 0.1) && near(r["y1"].as_f64().unwrap(), 0.9), "{r}");
+    }
+
+    #[test]
+    fn crs_radial_of_a_turned_raw_lands_on_the_oriented_photo() {
+        // A radial filter narrow and tall at the stored image's left (x 0.16..0.28, y 0.05..0.60):
+        // with orientation 8 it shows wide and flat across the lower middle (x 0.05..0.60,
+        // y 0.72..0.84), and its radii swap.
+        let x = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+          <rdf:Description rdf:about="" xmlns:tiff="http://ns.adobe.com/tiff/1.0/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+            tiff:Orientation="8" tiff:ImageWidth="7008" tiff:ImageLength="4672" crs:Version="15.0" crs:ProcessVersion="11.0">
+           <crs:MaskGroupBasedCorrections><rdf:Seq><rdf:li crs:What="Correction" crs:CorrectionAmount="1"
+             crs:CorrectionActive="true" crs:LocalHighlights2012="-0.5"><crs:CorrectionMasks><rdf:Seq>
+             <rdf:li crs:What="Mask/CircularGradient" crs:MaskActive="true" crs:MaskBlendMode="0" crs:MaskInverted="false"
+               crs:MaskValue="1" crs:Top="0.05" crs:Left="0.16" crs:Bottom="0.6" crs:Right="0.28" crs:Angle="0"
+               crs:Midpoint="50" crs:Roundness="0" crs:Feather="33" crs:Flipped="true" crs:Version="2"/>
+           </rdf:Seq></crs:CorrectionMasks></rdf:li></rdf:Seq></crs:MaskGroupBasedCorrections>
+          </rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        let radial = |xmp: &str| {
+            let Some(DevelopPatch::Partial(v)) = parse_sidecar(xmp, crate::crs::Target::RawAbsolute).unwrap().develop else {
+                panic!("a crs mask is a partial patch")
+            };
+            v.pointer("/masks/0/components/0/shape").cloned().expect("a radial")
+        };
+        let near = |a: &Value, b: f64| (a.as_f64().unwrap() - b).abs() < 1e-9;
+        let turned = radial(x);
+        assert!(near(&turned["center"]["x"], 0.325) && near(&turned["center"]["y"], 0.78), "{turned}");
+        let upright = radial(&x.replace(r#"tiff:Orientation="8" "#, ""));
+        assert!(near(&upright["center"]["x"], 0.22) && near(&upright["center"]["y"], 0.325), "{upright}");
+        // The radii swap: the turned ellipse is as wide as the upright one is tall.
+        let (sx, sy) = (1.0, 1.0 / crate::crs_masks::DEFAULT_ASPECT);
+        assert!(near(&turned["rx"], upright["ry"].as_f64().unwrap() / sy * sx), "{turned} {upright}");
+        assert!(near(&turned["ry"], upright["rx"].as_f64().unwrap() / sx * sy), "{turned} {upright}");
     }
 
     #[test]

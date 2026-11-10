@@ -610,3 +610,129 @@ fn probe_rejects_junk() {
     assert!(decode(b"FUJIFILMCCD-RAW 0201").is_err());
     assert_eq!(decode(b"junk"), Err(RawError::NotRaw));
 }
+
+/// `RawImage::normalized` as it was before the black-level lookup was hoisted out of the per-sample
+/// loop (Lapsewerk patch): the optimised version must give the same bits.
+fn normalized_per_sample(raw: &RawImage) -> Vec<f32> {
+    let (w, cpp, a) = (raw.width, raw.cpp, raw.active_area);
+    let scale: Vec<f32> = (0..cpp)
+        .map(|s| {
+            let range = raw.white_at(s) - raw.black.mean();
+            if range > 0.0 { 1.0 / range } else { 1.0 }
+        })
+        .collect();
+    let mut out = vec![0f32; a.width * a.height * cpp];
+    for y in 0..a.height {
+        let base = ((a.y + y) * w + a.x) * cpp;
+        for x in 0..a.width {
+            for s in 0..cpp {
+                let v = raw.data.get(base + x * cpp + s);
+                let b = raw.black.at(x, y, s, cpp);
+                let n = (v - b) * scale[s];
+                out[(y * a.width + x) * cpp + s] = if n.is_finite() { n } else { 0.0 };
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn normalized_matches_the_per_sample_black_level() {
+    let (w, h) = (23usize, 17usize);
+    for cpp in [1usize, 3] {
+        for float in [false, true] {
+            for (rows, cols, deltas) in [(1usize, 1usize, false), (2, 2, true), (3, 2, false), (2, 3, true)] {
+                let n = w * h * cpp;
+                let data = if float {
+                    let mut v: Vec<f32> = (0..n).map(|i| ((i * 7919) % 1000) as f32 / 997.0).collect();
+                    v[5] = f32::NAN;
+                    RawData::F32(v)
+                } else {
+                    RawData::U16((0..n).map(|i| (37 + (i * 7919) % 16000) as u16).collect())
+                };
+                let active = Rect::new(3, 2, 18, 13);
+                let black = BlackLevel {
+                    repeat_rows: rows,
+                    repeat_cols: cols,
+                    values: (0..rows * cols * cpp).map(|i| 30.0 + i as f32 * 1.7).collect(),
+                    delta_h: if deltas { (0..active.width).map(|x| x as f32 * 0.31).collect() } else { vec![] },
+                    // shorter than the area: rows past it have no delta
+                    delta_v: if deltas { (0..active.height - 4).map(|y| y as f32 * -0.23).collect() } else { vec![] },
+                };
+                let raw = RawImage {
+                    format: RawFormat::Dng,
+                    width: w,
+                    height: h,
+                    cpp,
+                    data,
+                    cfa: if cpp == 1 { Cfa::bayer("RGGB") } else { None },
+                    bits: 14,
+                    black,
+                    white: vec![if float { 1.0 } else { 16383.0 }],
+                    active_area: active,
+                    crop: Rect::default(),
+                    orientation: Orientation::Normal,
+                    color: ColorData::default(),
+                    wb_multipliers: None,
+                    linearized: false,
+                    pixel_aspect: 1.0,
+                    opcodes: OpcodeLists::default(),
+                    metadata: Metadata::default(),
+                    lens_metadata: Default::default(),
+                };
+                let fast = raw.normalized().unwrap().data;
+                let slow = normalized_per_sample(&raw);
+                let same = fast.iter().zip(&slow).all(|(a, b)| a.to_bits() == b.to_bits());
+                assert!(same && fast.len() == slow.len(), "cpp {cpp}, float {float}, pattern {rows}×{cols}, deltas {deltas}");
+            }
+        }
+    }
+}
+
+#[test]
+fn repair_samples_takes_the_same_colour_neighbours() {
+    let (w, h) = (12usize, 10usize);
+    // RGGB, every colour its own level: R 100, G 200, B 300.
+    let cfa = Cfa::bayer("RGGB").unwrap();
+    let level = |x: usize, y: usize| [100u16, 200, 300][cfa.color_at(x, y) as usize];
+    let mut data: Vec<u16> = (0..w * h).map(|i| level(i % w, i / w)).collect();
+    // a hot red sample, a hot green one beside a second listed green (not used as a neighbour), a corner one
+    let (red, green, green2, corner) = (4 * w + 4, 5 * w + 4, 5 * w + 6, 0);
+    for i in [red, green, green2, corner] {
+        data[i] = 60000;
+    }
+    let untouched = data.clone();
+    let mut raw = RawImage {
+        format: RawFormat::Dng,
+        width: w,
+        height: h,
+        cpp: 1,
+        data: RawData::U16(data),
+        cfa: Some(cfa.clone()),
+        bits: 16,
+        black: BlackLevel::uniform(0.0),
+        white: vec![65535.0],
+        active_area: Rect::new(0, 0, w, h),
+        crop: Rect::default(),
+        orientation: Orientation::Normal,
+        color: ColorData::default(),
+        wb_multipliers: None,
+        linearized: false,
+        pixel_aspect: 1.0,
+        opcodes: OpcodeLists::default(),
+        metadata: Metadata::default(),
+        lens_metadata: Default::default(),
+    };
+    // out-of-range and repeated positions are ignored
+    assert_eq!(raw.repair_samples(&[red, green, green2, corner, red, w * h + 5]), 4);
+    let RawData::U16(fixed) = &raw.data else { panic!() };
+    assert_eq!(fixed[red], 100);
+    assert_eq!(fixed[green], 200);
+    assert_eq!(fixed[green2], 200);
+    assert_eq!(fixed[corner], 100);
+    let changed = fixed.iter().zip(&untouched).filter(|(a, b)| a != b).count();
+    assert_eq!(changed, 4, "only the listed samples change");
+    // no CFA (a linear DNG): nothing to do
+    raw.cfa = None;
+    assert_eq!(raw.repair_samples(&[1]), 0);
+}
