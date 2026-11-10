@@ -85,6 +85,7 @@ pub mod walk;
 
 use std::sync::Arc;
 
+pub use camera_preview::CameraLook;
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
 pub use errors::{AiModel, ErrorKind};
 pub use fonts::{CRAFT_FONTS, CraftFont};

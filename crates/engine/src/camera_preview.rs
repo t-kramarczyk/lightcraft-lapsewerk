@@ -28,7 +28,9 @@ mod tone;
 pub(crate) use colour::{PROFILE_PROXY, dng_colour, dng_tone_eligible};
 #[cfg(test)]
 use colour::{PROXY, starting_colour_with};
-pub(crate) use colour::{file_local_look, starting_colour, starting_colour_tags, with_starting_colour};
+pub(crate) use colour::{
+    file_local_look, starting_colour, starting_colour_fixed, starting_colour_tags, starting_colour_unfitted, with_starting_colour,
+};
 pub(crate) use hue_sat::HueSat;
 #[cfg(test)]
 use hue_sat::{MIN_LUMINANCE_KEPT, NO_LUMINANCE_KEPT, fit_hue_sat, hue_saturation, restore_weight};
@@ -81,8 +83,11 @@ use tone::{HighlightCheck, ToneFit, fit_tone, fit_tone_conditional, highlights};
 /// stored with each smart preview.
 pub const LOOK_VERSION: u32 = 12;
 
+/// The look fitted to a raw's own JPEG (colour matrix, tone curve, hue/saturation table) for raws without colour
+/// matrices of their own. Public so a sequence can be developed with one look ([`crate::files::camera_look_of`],
+/// [`crate::files::load_vec_with_look`]) instead of one fitted to each frame.
 #[derive(Clone, Debug)]
-pub(crate) struct CameraLook {
+pub struct CameraLook {
     pub matrix: Mat3,
     pub tone: CameraTone,
     /// Hue/saturation correction after `matrix`, in linear ProPhoto RGB (DNG `ProfileHueSatMap`).
