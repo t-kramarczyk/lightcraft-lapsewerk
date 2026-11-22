@@ -2,6 +2,7 @@ use super::colour::bin_factor;
 use super::preview::{fit_box, load_embedded_preview};
 use super::probe::preview_reason;
 use super::{Arc, CameraColourModel, DcpProfile, DenoiseSpec, Filter, HIGHLIGHT_CLIP, Orientation, Rgb32f, SourceInfo, fit, xy_to_temp_tint};
+use crate::camera_preview::CameraLook;
 use crate::media::RawDecode;
 
 /// Decode a file into a linear Rec.2020 image no larger than `max_edge`, oriented.
@@ -20,13 +21,13 @@ pub fn load_bytes_with(bytes: &[u8], max_edge: usize, dcp: Option<&DcpProfile>) 
 
 /// [`load_bytes`] decoding a raw file as `with` says.
 pub fn load_bytes_decoded(bytes: &[u8], max_edge: usize, with: RawDecode<'_>) -> Result<(Rgb32f, SourceInfo), String> {
-    rayon::scope(|_| load_bytes_now(std::borrow::Cow::Borrowed(bytes), max_edge, None, false, with).map(|(img, _, info, _)| (img, info)))
+    rayon::scope(|_| load_bytes_now(std::borrow::Cow::Borrowed(bytes), max_edge, None, false, with, LookChoice::Fit, None).map(|(img, _, info, _)| (img, info)))
 }
 
 /// [`load_bytes`] taking the file's bytes: a raw file's bytes are freed as soon as it is decoded
 /// (less memory held while it is developed).
 pub fn load_vec(bytes: Vec<u8>, max_edge: usize, with: RawDecode<'_>) -> Result<(Rgb32f, SourceInfo), String> {
-    rayon::scope(move |_| load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, None, false, with).map(|(img, _, info, _)| (img, info)))
+    rayon::scope(move |_| load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, None, false, with, LookChoice::Fit, None).map(|(img, _, info, _)| (img, info)))
 }
 
 /// [`load_vec`] for a thumbnail: a DNG that keeps reduced-resolution copies of its raw image (Lightroom's HDR and
@@ -34,7 +35,7 @@ pub fn load_vec(bytes: Vec<u8>, max_edge: usize, with: RawDecode<'_>) -> Result<
 /// it did: such a picture is not the full image, and an export never renders from it.
 pub fn load_vec_reduced(bytes: Vec<u8>, max_edge: usize, with: RawDecode<'_>) -> Result<(Rgb32f, SourceInfo, bool), String> {
     rayon::scope(move |_| {
-        load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, None, true, with).map(|(img, _, info, reduced)| (img, info, reduced))
+        load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, None, true, with, LookChoice::Fit, None).map(|(img, _, info, reduced)| (img, info, reduced))
     })
 }
 
@@ -48,8 +49,82 @@ pub fn load_vec_pair(
     with: RawDecode<'_>,
 ) -> Result<(Rgb32f, Option<Rgb32f>, SourceInfo), String> {
     rayon::scope(move |_| {
-        load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, Some(spec), false, with).map(|(img, twin, info, _)| (img, twin, info))
+        load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, Some(spec), false, with, LookChoice::Fit, None).map(|(img, twin, info, _)| (img, twin, info))
     })
+}
+
+/// [`load_vec`] developing a raw with `look` instead of the look fitted to its own JPEG (see
+/// [`camera_look_of`]). Files that get no fitted look (raws with colour matrices, rendered images) load as
+/// [`load_vec`] does.
+pub fn load_vec_with_look(bytes: Vec<u8>, max_edge: usize, look: &CameraLook, with: RawDecode<'_>) -> Result<(Rgb32f, SourceInfo), String> {
+    rayon::scope(move |_| {
+        load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, None, false, with, LookChoice::Fixed(look), None).map(|(img, _, info, _)| (img, info))
+    })
+}
+
+/// How the frames of a time-lapse sequence get their look (Lapsewerk patch). A look fitted to each frame's own JPEG
+/// flickers twice over: the camera's JPEG processing changes from frame to frame, and in a dark scene the fit is
+/// accepted for some frames and refused for others (too few colour pairs), which renders those frames about ¾ stop
+/// apart.
+#[derive(Clone, Debug)]
+pub enum SequenceLook {
+    /// Each frame's own look, as [`load_vec`] fits it.
+    Own,
+    /// One look for every frame ([`camera_look_of`] of one of them).
+    Shared(Arc<CameraLook>),
+    /// No look fitted to any frame: every raw starts from the colour it has without one (its colour matrices,
+    /// else the camera's measured spectral matrices, else the neutral fallback) and the default tone.
+    Unfitted,
+}
+
+/// Where a raw's starting look comes from in `load_bytes_now`.
+#[derive(Clone, Copy)]
+enum LookChoice<'a> {
+    Fit,
+    Fixed(&'a CameraLook),
+    Unfitted,
+}
+
+/// [`load_vec`] for a frame of a time-lapse sequence (Lapsewerk patch): developed with `look` (see
+/// [`SequenceLook`]), and with the mosaic samples at `defects` (positions in the raw's sample data: hot pixels
+/// found over the sequence) replaced by their same-colour neighbours before anything else reads the mosaic.
+pub fn load_vec_for_sequence(
+    bytes: Vec<u8>,
+    max_edge: usize,
+    look: &SequenceLook,
+    defects: &[usize],
+    with: RawDecode<'_>,
+) -> Result<(Rgb32f, SourceInfo), String> {
+    let defects = (!defects.is_empty()).then_some(defects);
+    let look = match look {
+        SequenceLook::Own => LookChoice::Fit,
+        SequenceLook::Shared(l) => LookChoice::Fixed(l),
+        SequenceLook::Unfitted => LookChoice::Unfitted,
+    };
+    rayon::scope(move |_| {
+        load_bytes_now(std::borrow::Cow::Owned(bytes), max_edge, None, false, with, look, defects).map(|(img, _, info, _)| (img, info))
+    })
+}
+
+/// The look [`load_vec`] fits to a raw's own JPEG, to develop other files of the same camera with
+/// ([`load_vec_with_look`]): a time-lapse then has one look instead of one per frame. `Ok(None)` when the file gets
+/// no fitted look (not a raw, or a raw with colour matrices of its own). Mirrors the preparation in
+/// `load_bytes_now` (without an imported camera profile); `tests::camera_look_of_matches_load` holds the two together.
+pub fn camera_look_of(bytes: &[u8]) -> Result<Option<CameraLook>, String> {
+    if lightcraft_raw::probe(bytes).is_none() {
+        return Ok(None);
+    }
+    let mut raw = lightcraft_raw::decode(bytes).map_err(|e| e.to_string())?;
+    let info = raw.info();
+    let lens = crate::lens_profiles::for_raw(&info, || lightcraft_meta::extract(bytes));
+    let lens_geometry = crate::camera_preview::lens_geometry(&raw.opcodes.list3);
+    let dng_lens_ops = (raw.format == lightcraft_raw::RawFormat::Dng && raw.opcodes.list3.iter().any(|op| op.is_lens_correction()))
+        .then(|| raw.opcodes.list3.clone());
+    raw.opcodes.list3.retain(|op| !op.is_lens_correction());
+    let (_, _, look) = with_dng_lens_ops(&mut raw, dng_lens_ops.as_ref(), lens.as_ref(), list3, |raw, embedded| {
+        crate::camera_preview::starting_colour(raw, bytes, lens_geometry.as_ref(), embedded)
+    });
+    Ok(look)
 }
 
 /// The denoised camera RGB of `raw` from its cached product, as the plain development would have it: the default
@@ -80,6 +155,8 @@ fn load_bytes_now(
     denoise: Option<&DenoiseSpec>,
     allow_reduced: bool,
     with: RawDecode<'_>,
+    look: LookChoice<'_>,
+    defects: Option<&[usize]>,
 ) -> Result<(Rgb32f, Option<Rgb32f>, SourceInfo, bool), String> {
     let dcp = with.dcp;
     if lightcraft_raw::probe(&bytes).is_some() {
@@ -103,6 +180,11 @@ fn load_bytes_now(
             }
             Err(Err(e)) => return Err(e),
         };
+        // a sequence's hot pixels (Lapsewerk patch), repaired before anything reads the mosaic
+        // (a reduced copy has other sample positions: the defect list belongs to the full mosaic)
+        if let (Some(defects), false) = (defects, used_reduced) {
+            raw.repair_samples(defects);
+        }
         // single outlier photosites, replaced in the mosaic before anything is developed from it (#1345)
         if with.outliers {
             let t = std::time::Instant::now();
@@ -159,8 +241,11 @@ fn load_bytes_now(
         // the source's segmentation mattes (DNG semantic masks), read while the starting colour is fitted
         let ((xy, t, camera_look), mattes) = rayon::join(
             || {
-                with_dng_lens_ops(&mut raw, dng_lens_ops.as_ref(), lens.as_ref(), list3, |raw, embedded| {
-                    crate::camera_preview::starting_colour(raw, &bytes, lens_geometry.as_ref(), embedded)
+                with_dng_lens_ops(&mut raw, dng_lens_ops.as_ref(), lens.as_ref(), list3, |raw, embedded| match look {
+                    // a sequence's shared look, or none fitted (Lapsewerk patch)
+                    LookChoice::Fixed(look) => crate::camera_preview::starting_colour_fixed(raw, look),
+                    LookChoice::Unfitted => crate::camera_preview::starting_colour_unfitted(raw),
+                    LookChoice::Fit => crate::camera_preview::starting_colour(raw, &bytes, lens_geometry.as_ref(), embedded),
                 })
             },
             || dng_mattes(&bytes, &info),
