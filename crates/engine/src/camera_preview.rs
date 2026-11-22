@@ -28,9 +28,7 @@ mod tone;
 pub(crate) use colour::{PROFILE_PROXY, dng_colour, dng_tone_eligible};
 #[cfg(test)]
 use colour::{PROXY, starting_colour_with};
-pub(crate) use colour::{
-    file_local_look, starting_colour, starting_colour_fixed, starting_colour_tags, starting_colour_unfitted, with_starting_colour,
-};
+pub(crate) use colour::{file_local_look, starting_colour, starting_colour_tags, with_starting_colour};
 pub(crate) use hue_sat::HueSat;
 #[cfg(test)]
 use hue_sat::{MIN_LUMINANCE_KEPT, NO_LUMINANCE_KEPT, fit_hue_sat, hue_saturation, restore_weight};
@@ -81,13 +79,17 @@ use tone::{HighlightCheck, ToneFit, fit_tone, fit_tone_conditional, highlights};
 /// a tone-only fallback for near-black scenes with too few colour pairs (#1587); DNG tone fitting uses a
 /// lens-corrected proxy when the file carries lens opcodes; validated A7CR distortion, including the lens data
 /// stored with each smart preview.
-pub const LOOK_VERSION: u32 = 12;
+/// 13: tone curves no steeper than a log-log slope of 4 between knots (#1904).
+/// 13: the Canon CR3/CR2 camera JPEG read in the colour space of the Canon maker note (#2654).
+/// 13: the sensor proxy of every per-file fit gets the embedded vignetting correction the render applies (Fujifilm
+/// RAF; other makes with a lens database), so the render no longer applies it twice, at the position a lens warp samples;
+/// the warped candidate's alignment leaves out the pixels outside the sensor instead of reading them as black.
+/// 14: bundled camera profiles also match the Nikon model spellings that differ in case, spacing or the Z8 alias,
+/// so previews made without the profile are rebuilt.
+pub const LOOK_VERSION: u32 = 14;
 
-/// The look fitted to a raw's own JPEG (colour matrix, tone curve, hue/saturation table) for raws without colour
-/// matrices of their own. Public so a sequence can be developed with one look ([`crate::files::camera_look_of`],
-/// [`crate::files::load_vec_with_look`]) instead of one fitted to each frame.
 #[derive(Clone, Debug)]
-pub struct CameraLook {
+pub(crate) struct CameraLook {
     pub matrix: Mat3,
     pub tone: CameraTone,
     /// Hue/saturation correction after `matrix`, in linear ProPhoto RGB (DNG `ProfileHueSatMap`).
