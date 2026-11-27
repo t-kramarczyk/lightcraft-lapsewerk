@@ -145,7 +145,9 @@ fn v1_and_v2_render_as_before_v3() {
     }
 }
 
-const GOLDEN: [u64; 2] = [0x4830_59a3_ad92_326c, 0x9653_aed0_ea32_aff3];
+// Lapsewerk fork: the minifying prefilter is an area box (LAPSEWERK.md), which changes every
+// downscaled render on purpose; upstream's were [0x4830_59a3_ad92_326c, 0x9653_aed0_ea32_aff3].
+const GOLDEN: [u64; 2] = [0x62a9_a539_aba6_653e, 0x180f_2d17_bcbd_38d9];
 
 fn on(process: Process, s: &DevelopSettings) -> DevelopSettings {
     DevelopSettings { process: process.version(), ..s.clone() }

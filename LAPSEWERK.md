@@ -4,7 +4,7 @@ Snapshot of [storytold/lightcraft](https://github.com/storytold/lightcraft) at
 `fdcfc4e5a` (2026-11-22; first snapshot `5194cc20dea06d725079ac162c6912fc1f0d3a78`) (MIT OR Apache-2.0, licences and NOTICE unchanged; upstream `.github/workflows` left out), with additive
 patches used by Lapsewerk. Upstream behaviour is unchanged except where a patch below says so (the camera look
 fit with a lens database's profile, the a6400's matrices for the a6100, a6600 and ZV-E10, and the minifying
-prefilter: a tent instead of Mitchell).
+prefilter: an area box instead of Mitchell).
 
 ## Patch: one camera look for a sequence
 
@@ -98,3 +98,12 @@ instead of Mitchell. Mitchell's negative lobes (about −3 %) in linear light, n
 brighter than the sky, pushed the neighbours below zero, which clipped to black: dark rings around city lights and
 Jupiter in a night time-lapse (a city at night, 540×960: 204 black pixels in 10 frames; a star field, 320×180: a ring of
 zeros around Jupiter). The tent never goes negative: none left; detail 4 % softer by the mean gradient.
+
+## Patch – minifying prefilter: the area box
+
+The prefilter (area downscale to the output's scale before the bilinear resample) averages each output pixel's own
+area (box) instead of a tent twice as wide. The tent never went negative but blurred: a city series at 540 × 960
+kept 136 of its detail (variance of the Laplacian; the earlier workflow's film 255), a lake at 1620 × 1080 237
+(the same render made at 4096 and box-scaled: 772). With the box: 265 and 511, still never negative (no dark rings
+next to lights: 8 pixels darker than 25 beside a light in 10 night frames, 75 with the tent), flicker unchanged
+(0.0012 stops), and a star field shows 427 stars a frame instead of 233.

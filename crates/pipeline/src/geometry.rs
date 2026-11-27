@@ -333,7 +333,7 @@ impl Frame {
         let o = oriented.as_ref().unwrap_or(src);
         let plan = self.sample_plan(src.width, src.height, w, h);
         let base = match plan.prefilter {
-            Some((nw, nh)) => std::borrow::Cow::Owned(resize(o, nw, nh, Filter::Bilinear)),
+            Some((nw, nh)) => std::borrow::Cow::Owned(resize(o, nw, nh, Filter::Box)),
             None => std::borrow::Cow::Borrowed(o),
         };
         self.sample_base(base, plan, w, h)
@@ -355,7 +355,7 @@ impl Frame {
         let mut bases: Vec<((usize, usize), Rgb32f)> = Vec::new();
         for dims in plans.iter().filter_map(|p| p.1.prefilter) {
             if !bases.iter().any(|b| b.0 == dims) {
-                bases.push((dims, resize(o, dims.0, dims.1, Filter::Bilinear)));
+                bases.push((dims, resize(o, dims.0, dims.1, Filter::Box)));
             }
         }
         plans
