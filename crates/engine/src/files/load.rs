@@ -121,7 +121,7 @@ pub fn camera_look_of(bytes: &[u8]) -> Result<Option<CameraLook>, String> {
     let dng_lens_ops = (raw.format == lightcraft_raw::RawFormat::Dng && raw.opcodes.list3.iter().any(|op| op.is_lens_correction()))
         .then(|| raw.opcodes.list3.clone());
     raw.opcodes.list3.retain(|op| !op.is_lens_correction());
-    let (_, _, look) = with_dng_lens_ops(&mut raw, dng_lens_ops.as_ref(), lens.as_ref(), list3, |raw, embedded| {
+    let (_, _, look) = with_dng_lens_ops(&mut raw, dng_lens_ops.as_ref(), camera_lens(lens.as_ref()), list3, |raw, embedded| {
         crate::camera_preview::starting_colour(raw, bytes, lens_geometry.as_ref(), embedded)
     });
     Ok(look)
@@ -212,7 +212,7 @@ fn load_bytes_now(
             Some(p) if p.color.profile.tone_curve.is_none() => raw.color.profile.tone_curve.as_ref().and_then(dng_tone_curve).or_else(|| {
                 let own = raw.color.clone();
                 // the same proxy as the starting colour's fit below: the DNG's lens opcodes back in, no embedded lens
-                let tone = with_dng_lens_ops(&mut raw, dng_lens_ops.as_ref(), lens.as_ref(), list3, |raw, embedded| {
+                let tone = with_dng_lens_ops(&mut raw, dng_lens_ops.as_ref(), camera_lens(lens.as_ref()), list3, |raw, embedded| {
                     crate::camera_preview::starting_colour(raw, &bytes, lens_geometry.as_ref(), embedded)
                 })
                 .2
@@ -241,7 +241,7 @@ fn load_bytes_now(
         // the source's segmentation mattes (DNG semantic masks), read while the starting colour is fitted
         let ((xy, t, camera_look), mattes) = rayon::join(
             || {
-                with_dng_lens_ops(&mut raw, dng_lens_ops.as_ref(), lens.as_ref(), list3, |raw, embedded| match look {
+                with_dng_lens_ops(&mut raw, dng_lens_ops.as_ref(), camera_lens(lens.as_ref()), list3, |raw, embedded| match look {
                     // a sequence's shared look, or none fitted (Lapsewerk patch)
                     LookChoice::Fixed(look) => crate::camera_preview::starting_colour_fixed(raw, look),
                     LookChoice::Unfitted => crate::camera_preview::starting_colour_unfitted(raw),
@@ -512,6 +512,14 @@ fn list3(raw: &mut lightcraft_raw::RawImage) -> &mut Vec<lightcraft_raw::Opcode>
 /// `fit(raw, embedded)` with a DNG's lens opcodes `ops` back in `raw`'s `OpcodeList3` (`list3`), as its preview has
 /// them applied, and the list as it was afterwards. With the opcodes restored the proxy already includes the
 /// vignetting, so `embedded` is `None` then (else `lens`): every tone fit of one photo sees the same proxy.
+/// (Lapsewerk patch) The lens correction the camera's own JPEG went through: the file's (a camera that corrects
+/// its lens records it), not a lens database's profile, which the camera never applied. Pairing the sensor with the
+/// JPEG through a database profile's warp misaligned the two (a Viltrox 25 mm on a Sony a6400), the look fit failed
+/// and the photo fell back to the darker neutral colour.
+fn camera_lens(lens: Option<&lightcraft_develop::EmbeddedLens>) -> Option<&lightcraft_develop::EmbeddedLens> {
+    lens.filter(|l| l.source == lightcraft_develop::LensSource::File)
+}
+
 fn with_dng_lens_ops<R, L, T>(
     raw: &mut R,
     ops: Option<&Vec<lightcraft_raw::Opcode>>,

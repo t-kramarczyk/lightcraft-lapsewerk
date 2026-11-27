@@ -2,7 +2,9 @@
 
 Snapshot of [storytold/lightcraft](https://github.com/storytold/lightcraft) at
 `fdcfc4e5a` (2026-11-22; first snapshot `5194cc20dea06d725079ac162c6912fc1f0d3a78`) (MIT OR Apache-2.0, licences and NOTICE unchanged; upstream `.github/workflows` left out), with additive
-patches used by Lapsewerk. Upstream behaviour is unchanged.
+patches used by Lapsewerk. Upstream behaviour is unchanged except where a patch below says so (the camera look
+fit with a lens database's profile, the a6400's matrices for the a6100, a6600 and ZV-E10, and the minifying
+prefilter: a tent instead of Mitchell).
 
 ## Patch: one camera look for a sequence
 
@@ -75,3 +77,24 @@ sequence's hot pixels are repaired before upstream's own outlier pass. `camera_l
 DNG lens-opcode handling (`with_dng_lens_ops`). Patches 5 and 6 still apply: upstream turns face regions by a
 sidecar's orientation, not a `crs:` crop or masks. Tests: raw suite, engine `files::`/sidecar/crs suites, and the
 look tests against five Sony A7 IV raws (`LIGHTCRAFT_CORPUS`: 2 checked pixel-identical, 5 shared).
+
+## Patch – the camera look fit pairs the sensor with the camera JPEG through the file's own lens correction only
+
+`files::load` (`camera_lens`): a lens database's profile (lensfun) is a correction the camera never applied to its
+JPEG; warping the sensor proxy with it before fitting the look misaligned sensor and JPEG (Viltrox 25 mm on an a6400),
+the fit failed and the photo fell back to the darker neutral colour (a city series at dusk: sky 82 instead of 112 of 255). The fit
+now uses only a correction from the file itself; the rendered picture still gets the profile. Behaviour change
+against upstream: photos with a database profile keep their fitted look.
+
+## Patch – same-sensor matrices for Sony APS-C bodies
+
+`spectral::SAME_SENSOR`: ILCE-6100, ILCE-6600 and ZV-E10 use the ILCE-6400's matrices (one 24.2 MP Exmor sensor):
+their white balance reads in Kelvin instead of the relative placeholder. The colour look stays the JPEG fit.
+
+## Patch – no dark rings around bright lights when minifying
+
+`geometry::Frame::sample` / `sample_windows` prefilter (area downscale before the bilinear resample) with a tent filter
+instead of Mitchell. Mitchell's negative lobes (about −3 %) in linear light, next to a lamp or a planet fifty times
+brighter than the sky, pushed the neighbours below zero, which clipped to black: dark rings around city lights and
+Jupiter in a night time-lapse (a city at night, 540×960: 204 black pixels in 10 frames; a star field, 320×180: a ring of
+zeros around Jupiter). The tent never goes negative: none left; detail 4 % softer by the mean gradient.

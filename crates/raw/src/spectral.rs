@@ -63,6 +63,11 @@ const SAME_SENSOR: &[(&str, &str, &str)] = &[
     ("Fujifilm", "X-S20", "X-T4"),
     ("Fujifilm", "X-M5", "X-T3"),
     ("Fujifilm", "GFX100S II", "GFX 100"),
+    // Sony's 24.2 MP APS-C Exmor CMOS of the a6400, in the a6100, a6600 and ZV-E10 (Lapsewerk patch: without
+    // matrices these raws started from the neutral fallback, pink and blue-grey where the camera JPEG is neutral).
+    ("Sony", "ILCE-6100", "ILCE-6400"),
+    ("Sony", "ILCE-6600", "ILCE-6400"),
+    ("Sony", "ZV-E10", "ILCE-6400"),
 ];
 
 /// Model names compared without case, the brand, a leading `EOS` or a trailing `DIGITAL`
