@@ -107,3 +107,11 @@ kept 136 of its detail (variance of the Laplacian; the earlier workflow's film 2
 (the same render made at 4096 and box-scaled: 772). With the box: 265 and 511, still never negative (no dark rings
 next to lights: 8 pixels darker than 25 beside a light in 10 night frames, 75 with the tent), flicker unchanged
 (0.0012 stops), and a star field shows 427 stars a frame instead of 233.
+
+## Patch – lens correction and crops sampled from twice the scale
+
+`geometry::Frame::sample_plan`: a frame that is not shown whole (a lens correction's warp, a crop or turn) is
+prefiltered to twice the output's scale before its bilinear step. That step lands at fractional places and averaged
+two prefiltered pixels: with a lens database's correction a city series at 540 × 960 kept 237 of its detail
+(variance of the Laplacian) against 397 uncorrected; now 297, without moiré. A frame shown whole keeps the single
+prefilter (the render goldens are unchanged).

@@ -312,7 +312,18 @@ impl Frame {
     pub fn sample_plan(&self, src_w: usize, src_h: usize, w: usize, h: usize) -> SamplePlan {
         let (ow, oh) = if self.orient.swaps_axes() { (src_h, src_w) } else { (src_w, src_h) };
         let crop_px = self.crop.rect_px(self.ow, self.oh);
-        let k = crop_px.width() / w as f64;
+        let mut k = crop_px.width() / w as f64;
+        // A lens correction samples every output pixel at a bent, fractional place, where the bilinear
+        // step averages two prefiltered pixels: half the fine detail was gone (a city series, 540 × 960:
+        // 237 corrected against 397 uncorrected). Prefiltered to twice the output's scale, that step
+        // averages within half a pixel: 297, without moiré (an upright crop, uncorrected: 63 % of the
+        // same frame made at twice the size and box-halved, now as much).
+        // The same holds for a crop or turn (an upright frame cut from the photo): only a frame shown
+        // whole at the prefilter's own size is copied, every other is sampled the same way.
+        let whole = self.warp.is_none() && self.crop.is_identity() && !self.flip_h && !self.flip_v;
+        if !whole {
+            k /= 2.0;
+        }
         let prefilter = (k > 1.25).then(|| (((ow as f64 / k).round() as usize).max(1), ((oh as f64 / k).round() as usize).max(1)));
         let (bw, bh) = prefilter.unwrap_or((ow, oh));
         let (sx, sy) = (bw as f64 / ow as f64, bh as f64 / oh as f64);
